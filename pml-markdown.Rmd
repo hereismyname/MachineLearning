@@ -1,0 +1,164 @@
+---
+title: "Machine Learning"
+author: "A. M."
+date: "Friday, March 20, 2015"
+output: html_document
+---
+
+```{r setup, echo = FALSE, warning = FALSE}
+library(knitr)
+opts_knit$set(root.dir = "C:/Users/andwilmo/Documents/R/ML")
+```
+
+**Practical Machine Learning Course Assignment**
+
+The data was collected and made available by Velloso et al. (Qualitative Activity, Recognition of Weight Lifting Exercises, 2013). A training and test set were provided, with data collected from 6 subjects wearing accelerometers at 4 sites on their bodies. The project was motivated to find ways to accurately identify and classify proper and improper technique in terms of a fitness activity, as well as to give potential feedback to a user based on their performance. In this case, each subject was asked to perform a set of 10 repetitions of the Unilateral Dumbbell Biceps Curl, both correctly and in 4 commonly mistaken ways.
+
+The first step is to set up a directory containing the needed files, and then clear the datasets of any unneeded variables.
+
+```{r Setup and Data Retrieval, cache = TRUE}
+## Get training set
+if (file.exists("./pml-training.csv") == FALSE) {
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+                  "pml-training.csv")
+}
+
+## Get test set
+if (file.exists("./pml-testing.csv") == FALSE) {
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",
+                  "pml-testing.csv")
+}
+```
+
+After importing the data, I extracted a relatively small sample to understand the basic characteristics of the datasets.
+
+```{r Data Import & Initial Sampling, cache = TRUE, message = FALSE}
+library(dplyr)
+
+train <- tbl_df(read.csv("pml-training.csv", stringsAsFactors = FALSE))
+
+mysample <- train %>%
+    sample_n(2000)
+
+length(names(mysample))
+```
+
+The current dataframe has 152 variables, excluding identifying markers and the outcome variable. The outcome variable is categorical, with alphabetical levels for each exercise type: A) proper form, B) throwing elbows to the front, C) lifting the dumbbell only halfway, D) Lowering the dumbbell only halfway, E) throwing the hips to the front.
+The current number of predictors need to be reduced, and potentially non-contributive variables need to be removed.
+
+First, there appear to be computed descriptive statistics (i.e. mean, median, standard-deviation, etc.) for each participant attached to the data frame, leaving thousands of NA values. These will obviously be unhelpful for prediction, and will be excluded. Visual inspection of the variables related to kurtosis, skewness, amplitude, "max", and "min" also show this characteristic, although they were encoded as character vectors upon import; they will be excluded as well.
+
+```{r Near-Zero Variance report, message = FALSE}
+library(dplyr)
+mysample <- mysample[, !sapply(mysample, function(x) any(is.na(x)))]
+
+mysample <- mysample %>%
+    dplyr::select(-contains("kurtosis"), -contains("skewness"),
+           -contains("max"), -contains("min"), 
+           -contains("timestamp"), -contains("window"),
+           -contains("amplitude"),
+           -user_name) %>%
+    dplyr::select(-X)
+
+library(caret)
+nzv <- nearZeroVar(mysample, saveMetrics = TRUE)
+nzv
+```
+
+Excluding these variables leaves 52 predictors, all of them showing acceptable levels of variance. All predictors were reassigned as numeric values for analysis, and the outcome variable was reassigned as a factor.
+
+```{r create Quiz Set, cache = TRUE, message = FALSE}
+## remove extraneous variables
+train <- train <- train[, !sapply(train, function(x) any(is.na(x)))]
+train <- train %>%
+    dplyr::select(-contains("kurtosis"), -contains("skewness"),
+           -contains("max"), -contains("min"), 
+           -contains("timestamp"), -contains("window"),
+           -contains("amplitude"),
+           -user_name) %>%
+    dplyr::select(-X)
+
+## reclassify predictors as numeric vars, set outcome as factor var
+train[, 1:52] <- sapply(train[, 1:52], as.numeric)
+train[, 53] <- factor(train$classe)
+
+## create partition for further validation
+library(caret)
+inQuiz <- createDataPartition(train$classe, p = .4, list = FALSE)
+
+## define training and quiz set
+newTrain <- train[-inQuiz,]
+newQuiz <- train[inQuiz,]
+```
+
+Having partitioned the data, two models were fitted to the new training set. Both models used repeated cross-validation for training. The first was a simple LDA, as a benchmark analysis, selected for its computational efficiency. 5 folds with 10 reps were slected, using all predictors to inform the model. The second model employed random-forests, using 3 folds and 10 reps, specifying 500 trees to be built each iteration.
+
+```{r Modelbuilding, cache = TRUE}
+## model 1, LDA with 5 folds, 10 reps
+fitControl <- trainControl(method = "repeatedcv", number = 5, repeats = 10)
+ldafit <- train(classe ~ ., data = newTrain, method = "lda", trControl = fitControl) 
+
+## random-forests with 3 folds, 10 reps -- 500 trees
+fitControl <- trainControl(method = "repeatedcv", number = 3, repeats = 10)
+system.time(rffit <- train(classe ~ ., data = newTrain, method = "rf", ntree = 500, trainControl = fitControl))
+```
+
+Having built both models, their predictive power was tested on the quiz set.
+
+```{r Quiz prediction, cache = TRUE}
+ldapred <- predict.train(ldafit, newQuiz, type = "raw")
+## LDA-based model
+confusionMatrix(ldapred, newQuiz$classe)
+
+varImp(rffit)
+rfpred <- predict.train(rffit, newQuiz, type = "raw")
+## Random-forests based model
+confusionMatrix(rfpred, newQuiz$classe)
+```
+
+The LDA-based model showed a 30% error-rate. The random-forests based model performs at much higher levels of accuracy, showing an error rate of 0.96%. While more computationally demanding, this model presents a strong gain in accuracy.
+
+While the error is small, the random-forests based model appears to be least successful at predicting when a subject is only lifting the dumbbell part-way. An explanation could be due to the similarity of motion between lifting/lowering (which was a common misclassification in our model). Integrating temporal sensitivity to the model in these cases could be beneficial, differences in acceleration would likely be more pronounced between these types of motion.
+
+A major note is that the roll_belt variable accounts for 40.9% of the model's explanatory power within the random-forests model.
+```{r plot, fig.height = 4, fig.width = 4}
+ggplot(newQuiz, aes(roll_belt, yaw_belt, color = classe)) + geom_point()
+ggplot(newQuiz, aes(pitch_belt, total_accel_belt, color = classe)) + geom_point()
+```
+Exercises where the subjects were asked to engage their hips are (as one would expect) highly related to the belt-accelerometer. However, variables related to this accelerometer also confirm their importance graphically. While there appears to be much higher variability in plotting motion related to the arm-mounted accelerometers, there appear to be relatively distinct patterns of motion that can be detected by the belt accelerometer alone. This presents an exciting possibility of reducing the number of sensors needed to track/classify exercise-related movement, which prevents high levels of convenience for individuals interested in tracking their performance.
+
+Having built the models, the next step is to import, clean, and predict the test data with our fitted model.
+
+```{r test data, cache = TRUE}
+test <- tbl_df(read.csv("pml-testing.csv", stringsAsFactors = TRUE))
+
+test <- test <- test[, !sapply(test, function(x) any(is.na(x)))]
+test <- test %>%
+    dplyr::select(-contains("kurtosis"), -contains("skewness"),
+           -contains("max"), -contains("min"), 
+           -contains("timestamp"), -contains("window"),
+           -contains("amplitude"),
+           -user_name) %>%
+    dplyr::select(-X)
+
+test[, 1:52] <- sapply(test[, 1:52], as.numeric)
+test[, 53] <- factor(test$classe)
+
+finalldapred <- predict.train(ldafit, test, type = "raw")
+
+finalrfpred <- predict.train(rffit, test, type = "raw")
+```
+
+
+```{r write answers, eval = FALSE, echo = FALSE}
+dir.create("answers")
+pml_write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
+
+pml_write_files(finalrfpred)
+```
